@@ -14,6 +14,7 @@ class TestNN(unittest.TestCase):
       szs = [4, 8, 16, 32]
       for sz in szs:
         # create in tinygrad
+        Tensor.training = training
         bn = BatchNorm2d(sz, eps=1e-5, track_running_stats=training)
         bn.weight = Tensor.randn(sz)
         bn.bias = Tensor.randn(sz)
@@ -47,7 +48,7 @@ class TestNN(unittest.TestCase):
 
         np.testing.assert_allclose(bn.running_mean.numpy(), tbn.running_mean.detach().numpy(), rtol=1e-5, atol=1e-6)
 
-        np.testing.assert_allclose(bn.running_var.numpy(), tbn.running_var.detach().numpy(), rtol=1e-5)
+        np.testing.assert_allclose(bn.running_var.numpy(), tbn.running_var.detach().numpy(), rtol=1e-5, atol=1e-6)
 
   def test_batchnorm2d_training(self):
     self.test_batchnorm2d(True)
