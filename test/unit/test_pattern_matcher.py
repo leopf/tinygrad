@@ -3,13 +3,19 @@ from tinygrad.dtype import dtypes
 from tinygrad.ops import UOps, UOp, BinaryOps, TernaryOps, ReduceOps, UnaryOps # noqa: F401
 from tinygrad.ops import PatternMatcher, UPat
 
-class TestPatternMatcher(unittest.TestCase):
+class TestPatternMatcher(unittest.TestCase): # "UPat((UOps.CONST), None, name='x', dtype=None, allow_any_len=False, src=(None))"
   def test_simple_match(self):
     matcher = PatternMatcher([(UPat(UOps.CONST, name="x", dtype=dtypes.float), lambda x: x)])
     c1 = UOp(UOps.CONST, dtypes.float, arg=1.0)
     c2 = UOp(UOps.CONST, dtypes.int, arg=1)
     self.assertEqual(matcher.rewrite(c1), c1)
     self.assertEqual(matcher.rewrite(c2), None)
+
+  def test_int_arg(self):
+    matcher = PatternMatcher([(UPat((UOps.CONST), None, name='x', allow_any_len=False), lambda x: x)])
+    c1 = UOp(UOps.CONST, dtypes.int, arg=69, src=())
+    UPat((UOps.CONST), None, name='x', allow_any_len=False).match(c1, {})
+    self.assertIsNotNone(matcher.rewrite(c1))
 
   @unittest.skip("closures aren't supported on pattern matchers")
   def test_match_sz_0(self):
@@ -105,8 +111,10 @@ class TestPatternMatcher(unittest.TestCase):
     matcher = PatternMatcher([(UPat(UOps.CONST, name="x", dtype=dtypes.float32), lambda x: x)])
     c1 = UOp(UOps.CONST, dtypes.float, arg=1.0)
     c2 = UOp(UOps.CONST, dtypes.float64, arg=1.0)
+    c3 = UOp(UOps.CONST, dtypes.float.vec(4), arg=1.0)
     self.assertEqual(matcher.rewrite(c1), c1)
     self.assertEqual(matcher.rewrite(c2), None)
+    self.assertEqual(matcher.rewrite(c3), c3)
 
   def test_dtype_set(self):
     matcher = PatternMatcher([(UPat(UOps.CONST, name="x", dtype={dtypes.float32, dtypes.float64}), lambda x: x)])
@@ -118,6 +126,15 @@ class TestPatternMatcher(unittest.TestCase):
     self.assertEqual(matcher.rewrite(c2), c2)
     self.assertEqual(matcher.rewrite(c3), None)
     self.assertEqual(matcher.rewrite(c4), None)
+
+  def test_dtype_vec(self):
+    matcher = PatternMatcher([(UPat(UOps.CONST, name="x", dtype=dtypes.float.vec(4)), lambda x: x)])
+    c1 = UOp(UOps.CONST, dtypes.float, arg=1.0)
+    c2 = UOp(UOps.CONST, dtypes.float.vec(4), arg=1.0)
+    c3 = UOp(UOps.CONST, dtypes.float.vec(2), arg=1.0)
+    self.assertEqual(matcher.rewrite(c1), None)
+    self.assertEqual(matcher.rewrite(c2), c2)
+    self.assertEqual(matcher.rewrite(c3), None)
 
   def test_src_one(self):
     matcher = PatternMatcher([(UPat(UOps.ALU, name="x", src=(UPat(UOps.CONST), UPat(UOps.CONST))), lambda x: x)])
