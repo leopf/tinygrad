@@ -1,6 +1,6 @@
 import unittest, itertools
 from tinygrad.dtype import dtypes
-from tinygrad.ops import UOps, UOp, BinaryOps, TernaryOps, ReduceOps, UnaryOps # noqa: F401
+from tinygrad.ops import UOps, UOp, BinaryOps, TernaryOps, UnaryOps # noqa: F401
 from tinygrad.ops import PatternMatcher, UPat
 
 class TestPatternMatcher(unittest.TestCase): # "UPat((UOps.CONST), None, name='x', dtype=None, allow_any_len=False, src=(None))"
@@ -14,7 +14,6 @@ class TestPatternMatcher(unittest.TestCase): # "UPat((UOps.CONST), None, name='x
   def test_int_arg(self):
     matcher = PatternMatcher([(UPat((UOps.CONST), None, name='x', allow_any_len=False), lambda x: x)])
     c1 = UOp(UOps.CONST, dtypes.int, arg=69, src=())
-    UPat((UOps.CONST), None, name='x', allow_any_len=False).match(c1, {})
     self.assertIsNotNone(matcher.rewrite(c1))
 
   @unittest.skip("closures aren't supported on pattern matchers")

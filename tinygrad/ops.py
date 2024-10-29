@@ -1,6 +1,6 @@
 from __future__ import annotations
-from typing import Any, List, Optional, Set, Union, Tuple, Dict, Callable, cast, TYPE_CHECKING, TypeVar
-import sys, time, functools, itertools, math, operator, hashlib, os, types, pickle
+from typing import Any, FrozenSet, List, Optional, Set, Union, Tuple, Dict, Callable, cast, TYPE_CHECKING, TypeVar
+import sys, time, functools, itertools, math, operator, hashlib, os, types, pickle, collections
 from enum import auto, IntEnum, Enum
 from dataclasses import dataclass, field
 from weakref import WeakValueDictionary
@@ -246,7 +246,7 @@ class UOp(MathTrait):
 
   def to_lang(self, ctx: UOpLangContext):
     yield self
-    if not ctx.is_max_depth: return
+    if ctx.is_max_depth: return
     for s in self.src:
       yield UOpLangToken.start_src
       yield from s.to_lang(ctx)
@@ -528,8 +528,8 @@ class UPat(MathTrait):
     if self.src is None: return 0
     depths = [0]
     for opt in self.src:
-      if isinstance(opt, tuple): depths.extend(c.depth for c in opt)
-      else: depths.append(next(opt).depth)
+      if isinstance(opt, tuple): depths.extend(c.depth + 1 for c in opt)
+      else: depths.append(next(opt).depth + 1)
     return max(depths)
 
   @staticmethod
@@ -632,7 +632,7 @@ class PatternMatcher:
 class UOpLangContext:
   is_max_depth: bool
 
-class UOpLangToken(Enum):
+class UOpLangToken(FastEnum):
   start_src = auto()
   end_src = auto()
   not_token = auto()
@@ -640,37 +640,57 @@ class UOpLangToken(Enum):
 
 class UPatNFABuilder:
   def __init__(self, q_start: int, max_depth: int) -> types.NoneType:
-    self.transitions: Dict[Tuple[int, Any], Set[int]] = {}
+    self.delta: Dict[Tuple[int, Any], Set[int]] = {}
     self.accepting: Dict[int, UOp] = {}
     self.q_c = self.q_start = q_start
     self.max_depth = max_depth
 
-  # def to_dfa(self):
-  #   uvals: List[List[Any]] = []
-  #   for v in set(v for _, v in self.transitions.keys()):
-  #     vals = [v]
-  #     if isinstance(v, DType): vals.append(v.scalar())
-  #     if v not in UOpLangToken: vals.append(UOpLangToken.not_token)
-  #     uvals.append(vals)
+  def to_dfa(self):
+    handled_q_vals: Dict[int, Set[Any]] = {}
+    for oq, v in self.delta.keys(): handled_q_vals.setdefault(oq, set()).add(v)
 
-  #   qs = {self.q_start}
-  #   qmap = { qs: self._next_q()  }
-  #   changed = True
+    pending_states = collections.deque([frozenset([self.q_start])])
+    handled_states: Dict[FrozenSet[int], int] = {}
+    delta: Dict[Tuple[int, Any], FrozenSet[int]] = {}
+    state_counter = 0
 
-  #   while changed: pass
+    while len(pending_states) > 0:
+      if (qs := pending_states.popleft()) in handled_states: continue
+      handled_states[qs] = nq = (state_counter := state_counter + 1) - 1
+
+      uvals = [ [v] if type(v) is UOpLangToken else [v, UOpLangToken.not_token] for v in set().union(*(handled_q_vals.get(oq, set()) for oq in qs)) ]
+
+      for vals in uvals:
+        new_qs: Set[int] = set()
+        for q, v in itertools.product(qs, vals):
+          if (q_next := self.delta.get((q, v), None)) is not None: new_qs = new_qs.union(q_next)
+        new_qs = delta[(nq, vals[0])] = frozenset(new_qs)
+        pending_states.append(new_qs)
+
+    delta_final = { (qs, v): handled_states[qe] for (qs, v), qe in delta.items() }
+    if (end_q := handled_states.get(frozenset([]), None)) is not None:
+      delta_final = { (qs, v): qe for (qs, v), qe in delta_final.items() if qe != end_q }
+
+    accepting = { q: [ self.accepting[oq] for oq in qs if oq in self.accepting ] for qs, q in handled_states.items() if any(True for oq in qs if oq in self.accepting) }
+    max_depths = [ False for _ in range(state_counter) ]
+    for i in range(state_counter):
+      q = delta_final.get((i, UOpLangToken.start_src), None)
+      max_depths[i] = q is None or delta_final.get((q, UOpLangToken.end_src), None) == i
+
+    return delta_final, accepting, max_depths
 
   def build(self, p: UPat):
     self.accepting[self.add_upat(self.q_start, p)] = p
 
   def get_all_states(self):
     states = set()
-    for (s, _), ts in self.transitions.items():
+    for (s, _), ts in self.delta.items():
       states.add(s)
       for t in ts: states.add(t)
     return states
 
   def add_upat(self, qs: int, p: UPat):
-    assert p.op is not None and len(p.op) != 0
+    # assert p.op is not None and len(p.op) != 0
     q = self._match_options(qs, p.op)
     q = self._match_options(q, p.dtype)
     q = self._match_options(q, None if p.arg is None else (p.arg, ))
@@ -683,14 +703,15 @@ class UPatNFABuilder:
         qe = self._next_q()
         for opt in p.src:
           qcs = q
-          for c_idx in range(len(opt) - 1): qcs = self.add_child(qcs, None, opt[c_idx])
-          self.add_child(qcs, qe, opt[-1])
+          if len(opt) > 0:
+            for c_idx in range(len(opt) - 1): qcs = self.add_child(qcs, None, opt[c_idx])
+            self.add_child(qcs, qe, opt[-1])
         q = qe
       except Exception:
         c = cast(UOp, next(p.src[0]))
         self.add_child(q, q, c)
-
-    self._match_child_depth(q)
+    else:
+      self._match_child_depth(q)
     return q
 
   def add_child(self, qs: int, qe: Optional[int], p: UPat):
@@ -711,7 +732,7 @@ class UPatNFABuilder:
 
   def _add_transition(self, qs: int, v: Any, qe: Optional[int] = None):
     if qe is None: qe = self._next_q()
-    self.transitions[(qs, v)] = self.transitions.get((qs, v), set()).union({ qe })
+    self.delta[(qs, v)] = self.delta.get((qs, v), set()).union({ qe })
     return qe
 
   def _match_options(self, qs: int, options: Optional[Tuple]):
@@ -728,6 +749,7 @@ class UPatNFABuilder:
 class QStats:
   count = 0
   num = 0
+  cumtime = 0
 
 class SlowPatternMatcher(PatternMatcher):
   def __init__(self, patterns: List[Tuple[UPat, Callable]]):
@@ -771,20 +793,57 @@ class SlowPatternMatcher(PatternMatcher):
         new_qs = set()
         for q in qs:
           for v in vs:
-            new_qs = new_qs.union(self.nfa.transitions.get((q, v), {}))
+            new_qs = new_qs.union(self.nfa.delta.get((q, v), {}))
         qs = new_qs
         for q in qs:
           if q in self.nfa.accepting: pats.add(self.nfa.accepting[q])
 
-    # for p,fxn,_ in self.pdict.get((uop.op, uop.arg), []) + ([] if uop.arg is None else self.pdict.get((uop.op, None), [])):
-    #   if (matches := p.match(uop, {})) and (ret:=(fxn(ctx, **matches[0]) if ctx is not None else fxn(**matches[0]))) is not None:
-    #     assert p in pats, "Missmatch for NFA"
-    #     return ret
-    # return None
-
     pats = sorted(pats, key=lambda p: self.pattern_idx[p])
     for p in pats:
       assert uop.op in p.op and (p.arg is None or p.arg == uop.arg)
+      fxn = self.pattern_fxns[p]
+      if (matches := p.match(uop, {})) and (ret:=(fxn(ctx, **matches[0]) if ctx is not None else fxn(**matches[0]))) is not None: return ret
+    return None
+
+class FastPatternMatcher(SlowPatternMatcher):
+  def __init__(self, patterns: List[Tuple[UPat | Callable[..., Any]]]):
+    super().__init__(patterns)
+    self.delta, self.accepting, self.is_max_depth = self.nfa.to_dfa()
+    # self.accepting = { q: sorted(pats, key=lambda p: self.pattern_idx[p]) for q, pats in self.accepting.items() }
+
+  def rewrite(self, uop: UOp, ctx=None):
+    pats: List[UPat] = []
+
+    q = 0
+    lang_ctx = UOpLangContext(False)
+
+    for tok in uop.to_lang(lang_ctx):
+      if type(tok) is UOpLangToken:
+        q = self.delta.get((q, tok), None)
+      else:
+        q = self.delta.get((q, tok.op), None) or self.delta.get((q, UOpLangToken.not_token), None)
+        q = self.delta.get((q, tok.dtype), None) or self.delta.get((q, tok.dtype.scalar()), None) or self.delta.get((q, UOpLangToken.not_token), None)
+        q = self.delta.get((q, tok.arg), None) or self.delta.get((q, UOpLangToken.not_token), None)
+        q = self.delta.get((q, len(tok.src)), None) or self.delta.get((q, UOpLangToken.not_token), None)
+
+      if q is None: break
+      lang_ctx.is_max_depth = self.is_max_depth[q]
+      if (q_accepting := self.accepting.get(q, None)) is not None: pats.extend(q_accepting)
+
+    # if len(pats) == 0: return None
+    pats = sorted(set(pats), key=lambda p: self.pattern_idx[p])
+
+    # options = self.pdict.get((uop.op, uop.arg), []) + ([] if uop.arg is None else self.pdict.get((uop.op, None), []))
+
+    # for p, fxn, early_reject in options:
+    #   assert p in pats
+
+    for p, _ in self.patterns:
+      if (matches := p.match(uop, {})):
+        p.match(uop, {})
+        # assert p in pats
+    for p in pats:
+      # assert uop.op in p.op and (p.arg is None or p.arg == uop.arg)
       fxn = self.pattern_fxns[p]
       if (matches := p.match(uop, {})) and (ret:=(fxn(ctx, **matches[0]) if ctx is not None else fxn(**matches[0]))) is not None: return ret
     return None
@@ -860,7 +919,7 @@ if TRACK_MATCH_STATS:
         if v[1] != 0: print(f"{v[0]:6d} / {v[1]:7d} -- {v[3]*1000.:9.2f} / {v[2]*1000.:9.2f} ms -- {loc_str:15s}", k.printable())
         ret = [x+y for x,y in zip(ret, v)]
       print(f"{ret[0]:6d} / {ret[1]:7d} -- {ret[3]*1000.:9.2f} / {ret[2]*1000.:9.2f} ms -- TOTAL")
-PatternMatcher = SlowPatternMatcher
+PatternMatcher = FastPatternMatcher
 # *** simple graph rewrite engine ***
 
 class RewriteContext:
