@@ -1,4 +1,4 @@
-import os, json, pathlib, zipfile, pickle, tarfile, struct, functools
+import os, json, pathlib, zipfile, pickle, tarfile, struct, functools, itertools
 from typing import Dict, Union, List, Optional, Any, Tuple, Callable
 from tinygrad.tensor import Tensor
 from tinygrad.dtype import dtypes
@@ -42,20 +42,23 @@ def safe_save(tensors:Dict[str, Tensor], fn:str, metadata:Optional[Dict[str, Any
 
   ```python
   t = Tensor([1, 2, 3])
-  nn.state.safe_save({'t':t}, "test.safetensor")
+  nn.state.safe_save({"t": t}, "test.safetensor")
   ```
   """
-  headers, offset = {}, 0
-  if metadata: headers['__metadata__'] = metadata
-  for k,v in tensors.items():
-    headers[k] = {'dtype': inverse_safe_dtypes[v.dtype], 'shape': list(v.shape), 'data_offsets':[offset, offset+v.nbytes()]}
-    offset += v.nbytes()
-  j = json.dumps(headers, separators=(',', ':'))
-  j += "\x20"*((8-len(j)%8)%8)
+  offsets = [ 0, *itertools.accumulate(t.nbytes() for t in tensors.values()) ]
+  header = { k: { "dtype": inverse_safe_dtypes[v.dtype], "shape": list(v.shape), "data_offsets": [start_off, end_off] }
+            for (k, v), start_off, end_off in zip(tensors.items(), offsets, offsets[1:]) }
+  if metadata: header["__metadata__"] = metadata
+
+  raw_header = json.dumps(header, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+  raw_header += b"\x20"*((8-len(raw_header)%8)%8)
+
   pathlib.Path(fn).unlink(missing_ok=True)
-  t = Tensor.empty(8+len(j)+offset, dtype=dtypes.uint8, device=f"disk:{fn}")
-  t[0:8].bitcast(dtypes.int64).assign([len(j)])
-  t[8:8+len(j)].assign(list(j.encode('utf-8')))
+  t = Tensor.empty(8+len(raw_header)+offsets[-1], dtype=dtypes.uint8, device=f"disk:{fn}")
+
+  # https://github.com/huggingface/safetensors/blob/main/safetensors/src/tensor.rs#L292
+  t[:8+len(raw_header)].assign(struct.pack("<Q", len(raw_header)) + raw_header)
+
   for k,v in safe_load(t).items(): v.assign(tensors[k])
 
 # state dict
