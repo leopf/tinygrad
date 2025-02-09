@@ -170,7 +170,7 @@ CACHEDB: str = getenv("CACHEDB", os.path.abspath(os.path.join(cache_dir, "cache.
 
 VERSION = 19
 _db_connection = None
-def db_connection():
+def db_cursor():
   global _db_connection
   if _db_connection is None:
     os.makedirs(CACHEDB.rsplit(os.sep, 1)[0], exist_ok=True)
@@ -179,18 +179,17 @@ def db_connection():
     # that connection will lock the database
     with contextlib.suppress(sqlite3.OperationalError): _db_connection.execute("PRAGMA journal_mode=WAL").fetchone()
     if DEBUG >= 7: _db_connection.set_trace_callback(print)
-  return _db_connection
+  return _db_connection.cursor()
 
 def diskcache_clear():
-  cur = db_connection().cursor()
+  cur = db_cursor()
   drop_tables = cur.execute("SELECT 'DROP TABLE IF EXISTS ' || quote(name) || ';' FROM sqlite_master WHERE type = 'table';").fetchall()
   cur.executescript("\n".join([s[0] for s in drop_tables] + ["VACUUM;"]))
 
 def diskcache_get(table:str, key:Union[dict, str, int]) -> Any:
   if CACHELEVEL < 1: return None
   if isinstance(key, (str,int)): key = {"key": key}
-  conn = db_connection()
-  cur = conn.cursor()
+  cur = db_cursor()
   try:
     res = cur.execute(f"SELECT val FROM '{table}_{VERSION}' WHERE {' AND '.join([f'{x}=?' for x in key.keys()])}", tuple(key.values()))
   except sqlite3.OperationalError:
@@ -202,15 +201,14 @@ _db_tables = set()
 def diskcache_put(table:str, key:Union[dict, str, int], val:Any, prepickled=False):
   if CACHELEVEL < 1: return val
   if isinstance(key, (str,int)): key = {"key": key}
-  conn = db_connection()
-  cur = conn.cursor()
+  cur = db_cursor()
   if table not in _db_tables:
     TYPES = {str: "text", bool: "integer", int: "integer", float: "numeric", bytes: "blob"}
     ltypes = ', '.join(f"{k} {TYPES[type(key[k])]}" for k in key.keys())
     cur.execute(f"CREATE TABLE IF NOT EXISTS '{table}_{VERSION}' ({ltypes}, val blob, PRIMARY KEY ({', '.join(key.keys())}))")
     _db_tables.add(table)
   cur.execute(f"REPLACE INTO '{table}_{VERSION}' ({', '.join(key.keys())}, val) VALUES ({', '.join(['?']*len(key.keys()))}, ?)", tuple(key.values()) + (val if prepickled else pickle.dumps(val), ))  # noqa: E501
-  conn.commit()
+  cur.connection.commit()
   cur.close()
   return val
 

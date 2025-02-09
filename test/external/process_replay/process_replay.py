@@ -2,7 +2,7 @@
 # compare kernels created by HEAD against master
 import os, multiprocessing, logging, pickle, sqlite3, difflib, functools, warnings
 from typing import Callable, cast
-from tinygrad.helpers import VERSION, Context, ContextVar, colored, db_connection, getenv, tqdm
+from tinygrad.helpers import VERSION, Context, ContextVar, colored, db_cursor, getenv, tqdm
 from tinygrad.engine.schedule import create_schedule_with_vars
 from tinygrad.codegen.kernel import Kernel, Opt
 from tinygrad.renderer import Renderer
@@ -48,8 +48,7 @@ def diff(offset:int, name:str, fxn:Callable) -> None:
   # TODO: add this assert back for schedule
   if ASSERT_DIFF and name != "schedule": warnings.filterwarnings("error", category=ProcessReplayWarning)
   if early_stop.is_set(): return None
-  conn = db_connection()
-  cur = conn.cursor()
+  cur = db_cursor()
   cur.execute(f"SELECT val FROM '{name}_{TABLE_NAME}' LIMIT ? OFFSET ?", (PAGE_SIZE, offset))
   changed = 0
   for row in cur.fetchall():
@@ -83,19 +82,18 @@ def diff(offset:int, name:str, fxn:Callable) -> None:
       changes = list(difflib.unified_diff(str(good).splitlines(), str(args[-1]).splitlines()))
       logging.info("\n".join(colored(line, "red" if line.startswith("-") else "green" if line.startswith("+") else None) for line in changes))
       warnings.warn("PROCESS REPLAY DETECTED CHANGE", ProcessReplayWarning)
-  conn.commit()
+  cur.connection.commit()
   cur.close()
 
 # *** generic runner for executing fxn across all rows of a table in parallel
 
 def _pmap(name:str, fxn:Callable, maxtasksperchild:int=16) -> None:
-  conn = db_connection()
-  cur = conn.cursor()
+  cur = db_cursor()
   try: row_count = cur.execute(f"select count(*) from '{name}_{TABLE_NAME}'").fetchone()[0]
   except sqlite3.OperationalError:
     warnings.warn(f"{name}_{TABLE_NAME} isn't accessible in master, did DB_VERSION change?", ProcessReplayWarning)
     return None
-  conn.commit()
+  cur.connection.commit()
   cur.close()
   with multiprocessing.get_context("spawn").Pool(multiprocessing.cpu_count(), maxtasksperchild=maxtasksperchild) as pool:
     inputs = list(range(0, row_count, PAGE_SIZE))
