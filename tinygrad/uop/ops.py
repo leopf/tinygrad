@@ -237,7 +237,7 @@ class UOp(OpMixin, metaclass=UOpMetaClass):
       case Ops.DEFINE_GLOBAL | Ops.DEFINE_LOCAL | Ops.DEFINE_REG: return (self.ptrdtype.size,)
 
       # passthrough ops
-      case Ops.REDUCE | Ops.MSTACK | Ops.MSELECT | Ops.DETACH | Ops.CONTIGUOUS | Ops.CONTIGUOUS_BACKWARD | Ops.AFTER | Ops.END:
+      case Ops.REDUCE | Ops.MSTACK | Ops.MSELECT | Ops.DETACH | Ops.CONTIGUOUS | Ops.CONTIGUOUS_BACKWARD | Ops.AFTER | Ops.END | Ops.AUTOCOPY:
         return self.src[0]._shape
 
       # ops with custom handling
@@ -506,7 +506,8 @@ class UOp(OpMixin, metaclass=UOpMetaClass):
     if self.op is Ops.MULTI: return self.arg
     # NOTE: they all have to share an axis, we always choose [-1]
     if self.op in GroupOp.ALU: return axes[-1] if (axes := dedup([x.axis for x in self.src if x.axis is not None])) else None
-    if len(self.src) == 0: return None
+    # TODO: any case where this is incorrect? 
+    if len(self.src) == 0 or self.op is Ops.COPY: return None
     src_axis = self.src[0].axis
     if self.op is Ops.REDUCE_AXIS: return None if src_axis is not None and src_axis in self.arg[1] else src_axis
     if self.op is Ops.RESHAPE:
@@ -541,13 +542,14 @@ class UOp(OpMixin, metaclass=UOpMetaClass):
   @property
   def metadata(self) -> tuple[Metadata, ...]|None: return all_metadata.get(self, None)
   def encdec(self, *src, arg=None): return UOp(Ops.ENCDEC, self.dtype, src=(self,)+src, arg=arg)
+  def autocopy(self, priority:int): return UOp(Ops.AUTOCOPY, self.dtype, src=(self,), arg=priority)
 
   # *** uop movement ops ***
 
   @property
   def base(self) -> UOp:
     if self.op in GroupOp.Movement: return self.src[0].base
-    if self.op is Ops.MULTI: return self.src[0].base  # MULTI is really a VIEW
+    if self.op in (Ops.MULTI, Ops.AUTOCOPY): return self.src[0].base  # MULTI is really a VIEW
     return self
 
   # like gep, but might return an integer

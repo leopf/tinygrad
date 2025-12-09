@@ -111,7 +111,7 @@ def create_schedule_with_vars(sched_sink:UOp) -> tuple[list[ScheduleItem], dict[
 
 from tinygrad.engine.memory import memory_planner
 from tinygrad.schedule.rangeify import get_rangeify_map
-from tinygrad.schedule.multi import get_multi_map
+from tinygrad.schedule.multi import get_multi_map, get_autocopy_map
 
 def complete_create_schedule_with_vars(big_sink:UOp) -> tuple[dict[UOp, UOp], list[ScheduleItem], dict[str, int]]:
   # big_sink srcs are all the Tensors
@@ -122,6 +122,10 @@ def complete_create_schedule_with_vars(big_sink:UOp) -> tuple[dict[UOp, UOp], li
 
   # tensor map is what we return
   tensor_map: dict[UOp, UOp] = {}
+
+  if any(x.op is Ops.AUTOCOPY for x in big_sink.toposort()):
+    tensor_map |= get_autocopy_map(big_sink)
+    big_sink = big_sink.substitute(tensor_map, name="Apply Auto Copy")
 
   if any(isinstance(x._device, tuple) for x in big_sink.toposort()):
     tensor_map |= get_multi_map(big_sink)

@@ -235,6 +235,14 @@ class Tensor(OpMixin):
     """
     return [Tensor(u) for u in UOp.custom_kernel(*[t.uop for t in (self,)+lst], fxn=fxn, grad_fxn=grad_fxn)]
 
+  def autocopy(self, priority:int=0):
+    """
+    Enable automatic copy bahavior for resulting tensors.
+    Inserts copies automatically and fixes assign(copy(x), y) => assign(x, copy(y)). 
+    In case of a device conflict the priority defines which device is chosen (highest first).
+    """
+    return Tensor(self.uop.autocopy(priority), device=self.device)
+
   def schedule_with_vars(self, *lst:Tensor) -> tuple[list[ScheduleItem], dict[str, int]]:
     """
     Creates the schedule needed to realize these Tensor(s), with Variables.
@@ -993,14 +1001,16 @@ class Tensor(OpMixin):
     if gradient is None: gradient = Tensor(1.0, dtype=self.dtype, device=self.device, requires_grad=False)
     target_uops = [x.uop for x in targets]
     grads = compute_gradient(self.uop, gradient.uop, set(target_uops))
-    ret = []
+    ret: list[Tensor] = []
     for x in target_uops:
       if (y:=grads.get(x)) is None:
         if materialize_grads: y = x.const_like(0)
         else: raise RuntimeError(f"{x}\n\nnot found in\n\n{self.uop}")
-      ret.append(y)
+      ret.append(Tensor(y, device=y.device))
     # create returned Tensors
-    return [Tensor(u, device=t.device) for t,u in zip(targets, ret)]
+    if (mm:=next(((t,g) for t, g in zip(targets, ret) if t.device != g.device and not any(o.op is Ops.AUTOCOPY for o in t.uop.toposort())), None)):
+      raise RuntimeError(f"Device mismatch between target and grad: {mm[0].device} != {mm[1].device}")
+    return ret
 
   def backward(self, gradient:Tensor|None=None) -> Tensor:
     """

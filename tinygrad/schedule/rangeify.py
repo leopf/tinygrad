@@ -121,8 +121,8 @@ ALWAYS_RUN_OPS = {Ops.CONTIGUOUS, Ops.COPY, Ops.ASSIGN, Ops.ENCDEC, Ops.NOOP}
 
 # you don't know in the first pass if axes are going to die, this happens if there's an EXPAND to the left
 def cleanup_dead_axes(b:UOp):
-  # don't optimize ALWAYS_RUN_OPS
-  if b.src[0].op in ALWAYS_RUN_OPS: return None
+  # don't optimize ALWAYS_RUN_OPS, COPY needs to optimize to prevent buffer size mismatch
+  if b.src[0].op in (ALWAYS_RUN_OPS - {Ops.COPY}): return None
 
   new_rng = []
   hit = False
@@ -215,6 +215,12 @@ def remove_noop_bufferize(idx,b2):
   new_tag = (idx.src[0].tag or ()) + (b2.tag or ()) or None
   return idx.src[0].rtag(new_tag).shrink(tuple((0, s) for s in b2.shape)) if b2.shape else idx.src[0].rtag(new_tag)
 
+def mops_idx_passthrough(idx: UOp, ms: UOp):
+  # NOTE: dont passthrough expand(const)
+  if len(set((s.op, s.arg, s.src[1:]) for s in ms.src)) != 1 or any(s.src[0].op is Ops.CONST for s in ms.src): return
+  mop = ms.src[0].replace(src=(ms.replace(src=tuple(s.src[0] for s in ms.src)),) + ms.src[0].src[1:])
+  return idx.replace(src=(mop,) + idx.src[1:])
+
 pm_const_buffer_folding = pm_mops+PatternMatcher([
   (UPat(Ops.BUFFERIZE, name="b"), cleanup_dead_axes),
   (UPat(GroupOp.All-{Ops.BUFFERIZE, Ops.BUFFER}, name="x"), lambda x: x.replace(dtype=x.dtype.base) if isinstance(x.dtype, ImageDType) else None),
@@ -233,6 +239,8 @@ pm_const_buffer_folding = pm_mops+PatternMatcher([
   (UPat(Ops.COPY, src=(UPat.cvar("x"), UPat()), name="copy"), lambda copy,x: copy.const_like(x.arg)),
   # hack if a noop turned to a const
   (UPat.cvar("c").f(Ops.NOOP).f(Ops.BUFFERIZE, allow_any_len=True, name="buf"), lambda c,buf: buf.replace(src=(c,)+buf.src[1:])),
+  # pass mops through mstack
+  (UPat(Ops.MSTACK, src=UPat(GroupOp.Movement), name="ms").f(Ops.INDEX, allow_any_len=True, name="idx"), mops_idx_passthrough),
   # mstack on CONST is CONST
   (UPat(Ops.MSTACK, src=(UPat.var("s"),), allow_any_len=True).f(Ops.INDEX, allow_any_len=True),
    lambda s: UOp.const(c.dtype, c.arg) if (c:=s.base).op is Ops.CONST else None),
@@ -420,6 +428,7 @@ to_define_global = PatternMatcher([
   (UPat(Ops.STORE, name="x"), find_bufs),
   (UPat(Ops.BUFFER, name="buf"), debuf),
   (UPat(Ops.BIND, name="b"), unbind_kernel),
+  (UPat(Ops.MSELECT, src=(UPat(Ops.MSTACK),), name="x"), lambda x: x.src[0].src[x.arg]),
   (UPat((Ops.MSTACK, Ops.MSELECT, Ops.AFTER), name="after"), handle_after),
 
   # HACK in case any CONSTs were replaced
