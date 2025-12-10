@@ -1,7 +1,7 @@
 from typing import cast
 import functools, itertools, operator
 from tinygrad.helpers import all_same, all_int, partition, prod, DEBUG, RING, getenv
-from tinygrad.uop.ops import Ops, UOp, sint, PatternMatcher, UPat, GroupOp, track_rewrites, graph_rewrite_map, graph_rewrite
+from tinygrad.uop.ops import Ops, UOp, sint, PatternMatcher, UPat, GroupOp, graph_rewrite_map, graph_rewrite
 from tinygrad.device import Device
 
 # *** allreduce implementation ***
@@ -102,6 +102,8 @@ def mstack_early_shrink(ms:UOp, shrink:UOp):
 replace_allreduce = PatternMatcher([
   (UPat(Ops.ALLREDUCE, src=(UPat.var("buf"), UPat()), name="red"), handle_allreduce_multirank),
   (UPat(Ops.ALLREDUCE, src=(UPat.var("buf"), UPat()), name="red"), handle_allreduce),
+  (UPat(Ops.COPY, src=(UPat(Ops.BUFFER, name="buf"), UPat(Ops.DEVICE, name="dev"))),lambda buf,dev: UOp.new_buffer(dev.arg, buf.arg, buf.dtype)
+   if buf.device not in {"DISK", "NPY"} and isinstance(dev.arg, tuple) and isinstance(buf.device, str) else None),
   # BROADCAST: explicitly expand broadcast copies and combine with MSTACK
   (UPat(Ops.COPY, name="c", src=(UPat(GroupOp.All-{Ops.CONST}, name="x"), UPat(Ops.DEVICE))), lambda c,x:
     UOp(Ops.MSTACK, c.dtype, tuple(x.copy_to_device(d) for d in c.device)) if isinstance(c.device, tuple) and isinstance(x.device, str) else None),
@@ -245,14 +247,40 @@ autocopy_pm = PatternMatcher([
   (UPat(Ops.AUTOCOPY, src=(UPat(Ops.SINK, name="sink"),)), lambda sink: sink)
 ])
 
-@track_rewrites()
+def propagate_autocopy(x:UOp):
+  autocpy, noautocpy = partition(enumerate(x.src), lambda item: item[1].op is Ops.AUTOCOPY)
+  if any(all(cc.op is not Ops.AUTOCOPY for cc in c.toposort()) is Ops.AUTOCOPY for _, c in noautocpy): return # not ready
+  device_ref = next(item[1] for item in itertools.chain(noautocpy, sorted(autocpy, key=lambda aitem: -aitem[1].arg)) \
+                    if item[1]._device is not None)
+  device, axis = device_ref.device, device_ref.axis
+  # TODO: handle const devices correctly...
+  srcdict = dict(noautocpy)
+  for idx, aop in autocpy:
+    op = aop.src[0]
+    # TODO handle copy to not insert a second copy
+    if (isinstance(device, str) or len(device) == 1) and op._device != device: op = op.copy_to_device(device)
+    elif isinstance(device, tuple) and len(device) > 1 and (op._device != device or axis != op.axis):
+      if isinstance(op._device, tuple) and len(op._device) > 1: op = op.copy_to_device(device[0])
+      if axis is None: op = op.copy_to_device(device)
+      else: op = op.shard(device, axis)
+    srcdict[idx] = op
+
+  return x.replace(src=tuple(srcdict[idx] for idx in range(len(x.src)))).autocopy(min(c.arg for _, c in autocpy))
+
+autocopy_pm = PatternMatcher([
+  (UPat(Ops.ASSIGN, src=(UPat(Ops.AUTOCOPY, src=(UPat(Ops.COPY),), name="x"), UPat.var("y")), name="a"), \
+    lambda a, x, y: a.replace(src=(x.replace(src=(x.src[0].src[0],)), y))),
+  (UPat(GroupOp.All, custom_early_reject={Ops.AUTOCOPY}, name="x"), propagate_autocopy),
+  (UPat(Ops.AUTOCOPY, src=(UPat(Ops.SINK, name="sink"),)), lambda sink: sink)
+])
+
+
 def get_multi_map(big_sink:UOp) -> dict[UOp, UOp]:
   if getenv("VIZ"): graph_rewrite(big_sink, PatternMatcher([]), name="View Multi AST")
   ret = graph_rewrite_map(big_sink, multi_pm, name="multi_pm")
   if getenv("VIZ"): graph_rewrite(ret[big_sink], PatternMatcher([]), name="View Post Multi AST")
   return ret
 
-@track_rewrites()
 def get_autocopy_map(big_sink:UOp) -> dict[UOp, UOp]:
   rw_map = graph_rewrite_map(big_sink, autocopy_pm, name="autocopy_pm")
   return rw_map
