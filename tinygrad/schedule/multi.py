@@ -247,34 +247,6 @@ autocopy_pm = PatternMatcher([
   (UPat(Ops.AUTOCOPY, src=(UPat(Ops.SINK, name="sink"),)), lambda sink: sink)
 ])
 
-def propagate_autocopy(x:UOp):
-  autocpy, noautocpy = partition(enumerate(x.src), lambda item: item[1].op is Ops.AUTOCOPY)
-  if any(all(cc.op is not Ops.AUTOCOPY for cc in c.toposort()) is Ops.AUTOCOPY for _, c in noautocpy): return # not ready
-  device_ref = next(item[1] for item in itertools.chain(noautocpy, sorted(autocpy, key=lambda aitem: -aitem[1].arg)) \
-                    if item[1]._device is not None)
-  device, axis = device_ref.device, device_ref.axis
-  # TODO: handle const devices correctly...
-  srcdict = dict(noautocpy)
-  for idx, aop in autocpy:
-    op = aop.src[0]
-    # TODO handle copy to not insert a second copy
-    if (isinstance(device, str) or len(device) == 1) and op._device != device: op = op.copy_to_device(device)
-    elif isinstance(device, tuple) and len(device) > 1 and (op._device != device or axis != op.axis):
-      if isinstance(op._device, tuple) and len(op._device) > 1: op = op.copy_to_device(device[0])
-      if axis is None: op = op.copy_to_device(device)
-      else: op = op.shard(device, axis)
-    srcdict[idx] = op
-
-  return x.replace(src=tuple(srcdict[idx] for idx in range(len(x.src)))).autocopy(min(c.arg for _, c in autocpy))
-
-autocopy_pm = PatternMatcher([
-  (UPat(Ops.ASSIGN, src=(UPat(Ops.AUTOCOPY, src=(UPat(Ops.COPY),), name="x"), UPat.var("y")), name="a"), \
-    lambda a, x, y: a.replace(src=(x.replace(src=(x.src[0].src[0],)), y))),
-  (UPat(GroupOp.All, custom_early_reject={Ops.AUTOCOPY}, name="x"), propagate_autocopy),
-  (UPat(Ops.AUTOCOPY, src=(UPat(Ops.SINK, name="sink"),)), lambda sink: sink)
-])
-
-
 def get_multi_map(big_sink:UOp) -> dict[UOp, UOp]:
   if getenv("VIZ"): graph_rewrite(big_sink, PatternMatcher([]), name="View Multi AST")
   ret = graph_rewrite_map(big_sink, multi_pm, name="multi_pm")
